@@ -16,6 +16,9 @@
 
 package dev.onvoid.webrtc;
 
+import static java.util.Objects.isNull;
+import static java.util.Objects.nonNull;
+
 import dev.onvoid.webrtc.internal.DisposableNativeObject;
 import dev.onvoid.webrtc.internal.NativeLoader;
 import dev.onvoid.webrtc.media.MediaStreamTrack;
@@ -25,6 +28,7 @@ import dev.onvoid.webrtc.media.audio.AudioOptions;
 import dev.onvoid.webrtc.media.audio.AudioProcessing;
 import dev.onvoid.webrtc.media.audio.AudioTrackSource;
 import dev.onvoid.webrtc.media.audio.AudioTrack;
+import dev.onvoid.webrtc.media.video.EncodedVideoFrameSink;
 import dev.onvoid.webrtc.media.video.VideoTrackSource;
 import dev.onvoid.webrtc.media.video.VideoTrack;
 
@@ -55,6 +59,22 @@ public class PeerConnectionFactory extends DisposableNativeObject {
 
 	@SuppressWarnings("unused")
 	private long workerThreadHandle;
+
+	@SuppressWarnings("unused")
+	private long encodedDecoderFactoryHandle;
+
+	private EncodedVideoFrameSink encodedVideoFrameSink;
+
+	/**
+	 * Serializes {@link #setEncodedVideoFrameSink(EncodedVideoFrameSink)},
+	 * {@link #removeEncodedVideoFrameSink()} and {@link #dispose()}. Without
+	 * this monitor, a {@code set} running concurrently with a {@code remove}
+	 * could make the remove read a stale {@code null} field and silently skip
+	 * the native sink removal, and a {@code set}/{@code remove} racing with
+	 * {@code dispose()} could dereference the native wrapper factory after it
+	 * has been released.
+	 */
+	private final Object sinkLock = new Object();
 
 
 	/**
@@ -145,6 +165,50 @@ public class PeerConnectionFactory extends DisposableNativeObject {
 			RTCConfiguration config, PeerConnectionObserver observer);
 
 	/**
+	 * Sets the sink that receives encoded video frames before they are passed
+	 * to the video decoder. At most one sink can be set at a time; setting a
+	 * new sink replaces the current one.
+	 * <p>
+	 * A PeerConnectionFactory defines the media ingestion isolation domain:
+	 * all PeerConnections created by this factory deliver their encoded video
+	 * frames to the sink. If multiple media sources must be recorded
+	 * independently, use a dedicated PeerConnectionFactory per source.
+	 * <p>
+	 * The sink is invoked synchronously on an internal WebRTC decode thread.
+	 * Exceptions thrown by the sink are caught and logged by the native layer
+	 * and do not affect the decoding. Once {@link
+	 * #removeEncodedVideoFrameSink()} returns, the sink will not be invoked
+	 * again; an already in-flight invocation may complete.
+	 *
+	 * @param sink The sink that receives encoded video frames.
+	 */
+	public void setEncodedVideoFrameSink(EncodedVideoFrameSink sink) {
+		if (isNull(sink)) {
+			throw new NullPointerException("EncodedVideoFrameSink must not be null");
+		}
+
+		synchronized (sinkLock) {
+			setEncodedVideoFrameSinkInternal(sink);
+
+			encodedVideoFrameSink = sink;
+		}
+	}
+
+	/**
+	 * Removes the currently set {@link EncodedVideoFrameSink}. If no sink is
+	 * set, this is a no-op.
+	 */
+	public void removeEncodedVideoFrameSink() {
+		synchronized (sinkLock) {
+			if (nonNull(encodedVideoFrameSink)) {
+				removeEncodedVideoFrameSinkInternal();
+
+				encodedVideoFrameSink = null;
+			}
+		}
+	}
+
+	/**
 	 * Returns the capabilities of the system for receiving media of the given
 	 * media type.
 	 *
@@ -167,7 +231,25 @@ public class PeerConnectionFactory extends DisposableNativeObject {
 	public native RTCRtpCapabilities getRtpSenderCapabilities(MediaType type);
 
 	@Override
-	public native void dispose();
+	public void dispose() {
+		// Holding the sink lock across disposeNative guarantees that no
+		// concurrent set/remove can dereference the wrapper factory after it
+		// has been released by the media engine. Note: the sink is invoked on
+		// an internal decode thread, so onEncodedVideoFrame must not
+		// synchronously re-enter set/remove/dispose of this factory while
+		// another thread is disposing it.
+		synchronized (sinkLock) {
+			removeEncodedVideoFrameSink();
+
+			disposeNative();
+		}
+	}
+
+	private native void setEncodedVideoFrameSinkInternal(EncodedVideoFrameSink sink);
+
+	private native void removeEncodedVideoFrameSinkInternal();
+
+	private native void disposeNative();
 
 	private native void initialize(AudioDeviceModuleBase audioModule,
 			AudioProcessing audioProcessing);

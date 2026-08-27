@@ -20,6 +20,7 @@
 #include "api/PeerConnectionObserver.h"
 #include "api/RTCConfiguration.h"
 #include "api/RTCRtpCapabilities.h"
+#include "rtc/EncodedFrameAwareVideoDecoderFactory.h"
 #include "JavaEnums.h"
 #include "JavaError.h"
 #include "JavaFactories.h"
@@ -89,6 +90,26 @@ JNIEXPORT void JNICALL Java_dev_onvoid_webrtc_PeerConnectionFactory_initialize
 		webrtc::scoped_refptr<webrtc::AudioProcessing> apm(processing);
 		webrtc::scoped_refptr<webrtc::AudioDeviceModule> adm(audioDevModule);
 
+		// Wrap the real video decoder factory, so that every created decoder
+		// dispatches a deep copy of its encoded images to the encoded frame
+		// sink (if one is set). The wrapper is owned by the media engine of
+		// the created native factory; the Java side only keeps an observing
+		// handle that is cleared on dispose before the factory is released.
+		std::unique_ptr<webrtc::VideoDecoderFactory> videoDecoderFactory =
+#ifdef __APPLE__
+			std::make_unique<jni::EncodedFrameAwareVideoDecoderFactory>(
+				webrtc::ObjCToNativeVideoDecoderFactory([[RTC_OBJC_TYPE(RTCDefaultVideoDecoderFactory) alloc] init]));
+#else
+			std::make_unique<jni::EncodedFrameAwareVideoDecoderFactory>(
+				std::make_unique<webrtc::VideoDecoderFactoryTemplate<
+					webrtc::LibvpxVp8DecoderTemplateAdapter,
+					webrtc::LibvpxVp9DecoderTemplateAdapter,
+					webrtc::OpenH264DecoderTemplateAdapter,
+					webrtc::Dav1dDecoderTemplateAdapter>>());
+#endif
+		jni::EncodedFrameAwareVideoDecoderFactory * encodedDecoderFactory =
+			static_cast<jni::EncodedFrameAwareVideoDecoderFactory *>(videoDecoderFactory.get());
+
 		auto factory = webrtc::CreatePeerConnectionFactory(
 			networkThread.get(),
 			workerThread.get(),
@@ -98,19 +119,14 @@ JNIEXPORT void JNICALL Java_dev_onvoid_webrtc_PeerConnectionFactory_initialize
 			webrtc::CreateBuiltinAudioDecoderFactory(),
 #ifdef __APPLE__
 			webrtc::ObjCToNativeVideoEncoderFactory([[RTC_OBJC_TYPE(RTCDefaultVideoEncoderFactory) alloc] init]),
-			webrtc::ObjCToNativeVideoDecoderFactory([[RTC_OBJC_TYPE(RTCDefaultVideoDecoderFactory) alloc] init]),
 #else
 			std::make_unique<webrtc::VideoEncoderFactoryTemplate<
 				webrtc::LibvpxVp8EncoderTemplateAdapter,
 				webrtc::LibvpxVp9EncoderTemplateAdapter,
 				webrtc::OpenH264EncoderTemplateAdapter,
 				webrtc::LibaomAv1EncoderTemplateAdapter>>(),
-			std::make_unique<webrtc::VideoDecoderFactoryTemplate<
-				webrtc::LibvpxVp8DecoderTemplateAdapter,
-				webrtc::LibvpxVp9DecoderTemplateAdapter,
-				webrtc::OpenH264DecoderTemplateAdapter,
-				webrtc::Dav1dDecoderTemplateAdapter>>(),
 #endif
+			std::move(videoDecoderFactory),
 			nullptr,
 			apm);
 
@@ -119,6 +135,7 @@ JNIEXPORT void JNICALL Java_dev_onvoid_webrtc_PeerConnectionFactory_initialize
 			SetHandle(env, caller, "networkThreadHandle", networkThread.release());
 			SetHandle(env, caller, "signalingThreadHandle", signalingThread.release());
 			SetHandle(env, caller, "workerThreadHandle", workerThread.release());
+			SetHandle(env, caller, "encodedDecoderFactoryHandle", encodedDecoderFactory);
 		}
 		else {
 			throw jni::Exception("Create PeerConnectionFactory failed");
@@ -129,7 +146,7 @@ JNIEXPORT void JNICALL Java_dev_onvoid_webrtc_PeerConnectionFactory_initialize
 	}
 }
 
-JNIEXPORT void JNICALL Java_dev_onvoid_webrtc_PeerConnectionFactory_dispose
+JNIEXPORT void JNICALL Java_dev_onvoid_webrtc_PeerConnectionFactory_disposeNative
 (JNIEnv * env, jobject caller)
 {
 	webrtc::PeerConnectionFactoryInterface * factory = GetHandle<webrtc::PeerConnectionFactoryInterface>(env, caller);
@@ -138,6 +155,19 @@ JNIEXPORT void JNICALL Java_dev_onvoid_webrtc_PeerConnectionFactory_dispose
 	webrtc::Thread * networkThread = GetHandle<webrtc::Thread>(env, caller, "networkThreadHandle");
 	webrtc::Thread * signalingThread = GetHandle<webrtc::Thread>(env, caller, "signalingThreadHandle");
 	webrtc::Thread * workerThread = GetHandle<webrtc::Thread>(env, caller, "workerThreadHandle");
+
+	// Release the encoded frame sink (and its Java global reference) before
+	// the native factory is destroyed, so no callback can occur after the
+	// dispose. The wrapper factory itself is owned by the native factory's
+	// media engine and must not be deleted here.
+	jni::EncodedFrameAwareVideoDecoderFactory * encodedDecoderFactory =
+		GetHandle<jni::EncodedFrameAwareVideoDecoderFactory>(env, caller, "encodedDecoderFactoryHandle");
+
+	if (encodedDecoderFactory != nullptr) {
+		encodedDecoderFactory->RemoveSink();
+
+		SetHandle<std::nullptr_t>(env, caller, "encodedDecoderFactoryHandle", nullptr);
+	}
 
 	webrtc::RefCountReleaseStatus status = factory->Release();
 
@@ -162,6 +192,41 @@ JNIEXPORT void JNICALL Java_dev_onvoid_webrtc_PeerConnectionFactory_dispose
 			workerThread->Stop();
 			delete workerThread;
 		}
+	}
+	catch (...) {
+		ThrowCxxJavaException(env);
+	}
+}
+
+JNIEXPORT void JNICALL Java_dev_onvoid_webrtc_PeerConnectionFactory_setEncodedVideoFrameSinkInternal
+(JNIEnv * env, jobject caller, jobject jsink)
+{
+	if (jsink == nullptr) {
+		env->Throw(jni::JavaNullPointerException(env, "EncodedVideoFrameSink must not be null"));
+		return;
+	}
+
+	jni::EncodedFrameAwareVideoDecoderFactory * encodedDecoderFactory =
+		GetHandle<jni::EncodedFrameAwareVideoDecoderFactory>(env, caller, "encodedDecoderFactoryHandle");
+	CHECK_HANDLE(encodedDecoderFactory);
+
+	try {
+		encodedDecoderFactory->SetSink(env, jsink);
+	}
+	catch (...) {
+		ThrowCxxJavaException(env);
+	}
+}
+
+JNIEXPORT void JNICALL Java_dev_onvoid_webrtc_PeerConnectionFactory_removeEncodedVideoFrameSinkInternal
+(JNIEnv * env, jobject caller)
+{
+	jni::EncodedFrameAwareVideoDecoderFactory * encodedDecoderFactory =
+		GetHandle<jni::EncodedFrameAwareVideoDecoderFactory>(env, caller, "encodedDecoderFactoryHandle");
+	CHECK_HANDLE(encodedDecoderFactory);
+
+	try {
+		encodedDecoderFactory->RemoveSink();
 	}
 	catch (...) {
 		ThrowCxxJavaException(env);

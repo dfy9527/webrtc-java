@@ -57,10 +57,26 @@ extern "C" {
 
 	/*
 	 * Class:     dev_onvoid_webrtc_PeerConnectionFactory
-	 * Method:    dispose
+	 * Method:    disposeNative
 	 * Signature: ()V
 	 */
-	JNIEXPORT void JNICALL Java_dev_onvoid_webrtc_PeerConnectionFactory_dispose
+	JNIEXPORT void JNICALL Java_dev_onvoid_webrtc_PeerConnectionFactory_disposeNative
+	(JNIEnv *, jobject);
+
+	/*
+	 * Class:     dev_onvoid_webrtc_PeerConnectionFactory
+	 * Method:    setEncodedVideoFrameSinkInternal
+	 * Signature: (Ldev/onvoid/webrtc/media/video/EncodedVideoFrameSink;)V
+	 */
+	JNIEXPORT void JNICALL Java_dev_onvoid_webrtc_PeerConnectionFactory_setEncodedVideoFrameSinkInternal
+	(JNIEnv *, jobject, jobject);
+
+	/*
+	 * Class:     dev_onvoid_webrtc_PeerConnectionFactory
+	 * Method:    removeEncodedVideoFrameSinkInternal
+	 * Signature: ()V
+	 */
+	JNIEXPORT void JNICALL Java_dev_onvoid_webrtc_PeerConnectionFactory_removeEncodedVideoFrameSinkInternal
 	(JNIEnv *, jobject);
 
 	/*
