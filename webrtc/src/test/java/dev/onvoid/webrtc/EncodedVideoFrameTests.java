@@ -159,15 +159,39 @@ class EncodedVideoFrameTests extends TestBase {
 
         void pushFrames(long durationMs) throws InterruptedException {
             long end = System.currentTimeMillis() + durationMs;
+            int frameIndex = 0;
 
             while (System.currentTimeMillis() < end) {
                 NativeI420Buffer buffer = NativeI420Buffer.allocate(WIDTH, HEIGHT);
+                writeMovingBlock(buffer, frameIndex++);
+
                 VideoFrame frame = new VideoFrame(buffer, System.nanoTime());
 
                 source.pushFrame(frame);
                 frame.release();
 
                 Thread.sleep(FRAME_INTERVAL_MS);
+            }
+        }
+
+        /**
+         * Draws a small block that moves across the frame every iteration.
+         * Consecutive frames then always differ, so software encoders (e.g.
+         * OpenH264 on Windows/Linux) are forced to emit a new frame instead of
+         * rate-control-skipping identical blank content. The Y plane is
+         * writable: the JNI layer wraps it in a direct ByteBuffer.
+         */
+        private static void writeMovingBlock(NativeI420Buffer buffer, int frameIndex) {
+            final int block = 16;
+            int x = (frameIndex * 16) % WIDTH;
+            int y = (frameIndex * 8) % HEIGHT;
+            ByteBuffer dataY = buffer.getDataY();
+            int strideY = buffer.getStrideY();
+
+            for (int row = 0; row < block && y + row < HEIGHT; row++) {
+                for (int col = 0; col < block && x + col < WIDTH; col++) {
+                    dataY.put((y + row) * strideY + (x + col), (byte) 0xFF);
+                }
             }
         }
 
