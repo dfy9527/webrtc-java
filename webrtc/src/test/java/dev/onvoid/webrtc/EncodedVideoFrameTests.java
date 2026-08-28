@@ -52,6 +52,7 @@ class EncodedVideoFrameTests extends TestBase {
 
     private static final long FRAME_INTERVAL_MS = 40; // ~25 fps
     private static final long AWAIT_MS = 10000;
+    private static final long QUIESCENCE_MS = 1500;
 
 
     private static final class TestEncodedSink implements EncodedVideoFrameSink {
@@ -76,6 +77,18 @@ class EncodedVideoFrameTests extends TestBase {
 
         boolean awaitFirstFrame() throws InterruptedException {
             return firstFrame.await(AWAIT_MS, TimeUnit.MILLISECONDS);
+        }
+
+        boolean awaitFrameCount(int n) throws InterruptedException {
+            long deadline = System.currentTimeMillis() + AWAIT_MS;
+
+            while (System.currentTimeMillis() < deadline) {
+                if (count.get() >= n) {
+                    return true;
+                }
+                Thread.sleep(10);
+            }
+            return count.get() >= n;
         }
 
         EncodedVideoFrame first() {
@@ -224,8 +237,30 @@ class EncodedVideoFrameTests extends TestBase {
         return false;
     }
 
-    private static void grace(long ms) throws InterruptedException {
-        Thread.sleep(ms);
+    /**
+     * Waits until the sink stops receiving new frames for QUIESCENCE_MS. The
+     * WebRTC decode pipeline, especially the hardware codecs used on macOS,
+     * can deliver frames well after pushing has stopped, so a fixed sleep is
+     * not a reliable signal that the pipeline has drained.
+     */
+    private static boolean waitForQuiescence(TestEncodedSink sink) throws InterruptedException {
+        long deadline = System.currentTimeMillis() + AWAIT_MS;
+        int lastCount = sink.count.get();
+        long lastChange = System.currentTimeMillis();
+
+        while (System.currentTimeMillis() < deadline) {
+            Thread.sleep(20);
+            int current = sink.count.get();
+
+            if (current != lastCount) {
+                lastCount = current;
+                lastChange = System.currentTimeMillis();
+            }
+            else if (System.currentTimeMillis() - lastChange >= QUIESCENCE_MS) {
+                return true;
+            }
+        }
+        return false;
     }
 
 
@@ -419,13 +454,13 @@ class EncodedVideoFrameTests extends TestBase {
 
             factory.removeEncodedVideoFrameSink();
 
-            // In-flight delivery may complete once; allow it to settle.
-            grace(500);
+            // In-flight delivery may complete once; wait until it settles.
+            assertTrue(waitForQuiescence(sink), "Sink must settle after removal");
 
             int count = sink.count.get();
 
             loopback.pushFrames(1500);
-            grace(500);
+            assertTrue(waitForQuiescence(sink), "Sink must stay quiet");
 
             assertEquals(count, sink.count.get(), "Sink must not be invoked after removal");
         }
@@ -471,7 +506,10 @@ class EncodedVideoFrameTests extends TestBase {
 
             loopback.pushFrames(2000);
 
-            assertTrue(sink.awaitFirstFrame(), "No encoded video frame received");
+            // The second frame may lag behind the first on slower pipelines
+            // (e.g. the hardware codecs used on macOS), so wait for it instead
+            // of asserting immediately after the first frame.
+            assertTrue(sink.awaitFrameCount(2), "At least two frames expected");
 
             synchronized (sink.frames) {
                 assertTrue(sink.frames.size() >= 2, "At least two frames expected");
@@ -522,13 +560,22 @@ class EncodedVideoFrameTests extends TestBase {
             assertTrue(sinkA.awaitFirstFrame(), "Sink A did not receive its own stream");
             assertTrue(sinkB.awaitFirstFrame(), "Sink B did not receive its own stream");
 
-            // Phase 2: only stream A sends. Sink B must stay silent.
-            grace(500);
+            // Phase 2: only stream A sends. Sink B must stay silent. Wait out
+            // B's own pipeline backlog (hardware decode latency) before
+            // snapshotting, otherwise B's own delayed frames would look like
+            // cross-routed frames.
+            assertTrue(waitForQuiescence(sinkB), "Sink B must go quiet before phase 2");
             int countB = sinkB.count.get();
+            int countA = sinkA.count.get();
 
             loopbackA.pushFrames(1500);
-            grace(500);
 
+            // Prove that A actually transmitted before asserting on B.
+            assertTrue(sinkA.awaitFrameCount(countA + 1), "Sink A must receive new frames in phase 2");
+
+            // If A's frames cross-routed to B, B would keep receiving frames
+            // and never go quiet here.
+            assertTrue(waitForQuiescence(sinkB), "Sink B must not receive frames of factory A");
             assertEquals(countB, sinkB.count.get(), "Sink B must not receive frames of factory A");
         }
         finally {
@@ -597,14 +644,14 @@ class EncodedVideoFrameTests extends TestBase {
 
             pusher.join();
 
-            // Let a possible in-flight delivery complete.
-            grace(500);
+            // Let possible in-flight deliveries complete.
+            assertTrue(waitForQuiescence(sinkA) && waitForQuiescence(sinkB), "Sinks must settle");
 
             int countA = sinkA.count.get();
             int countB = sinkB.count.get();
 
             factory.removeEncodedVideoFrameSink();
-            grace(500);
+            assertTrue(waitForQuiescence(sinkA) && waitForQuiescence(sinkB), "Sinks must stay quiet after removal");
 
             assertEquals(countA, sinkA.count.get(), "Sink A must not be invoked after removal");
             assertEquals(countB, sinkB.count.get(), "Sink B must not be invoked after removal");
@@ -640,11 +687,11 @@ class EncodedVideoFrameTests extends TestBase {
         }
 
         // No new callbacks after the dispose.
-        grace(800);
+        assertTrue(waitForQuiescence(sink), "Sink must settle after dispose");
 
         int count = sink.count.get();
 
-        grace(800);
+        assertTrue(waitForQuiescence(sink), "Sink must stay quiet after dispose");
 
         assertEquals(count, sink.count.get(), "No callbacks must occur after dispose");
     }
@@ -670,11 +717,12 @@ class EncodedVideoFrameTests extends TestBase {
 
             assertTrue(sinkB.awaitFirstFrame(), "Sink B did not receive frames after replacement");
 
-            grace(500);
+            // Sink A is replaced; wait for its own in-flight frames to drain.
+            assertTrue(waitForQuiescence(sinkA), "Replaced sink A must settle");
             int countA = sinkA.count.get();
 
             loopback.pushFrames(1500);
-            grace(500);
+            assertTrue(waitForQuiescence(sinkA), "Replaced sink A must stay quiet");
 
             assertEquals(countA, sinkA.count.get(), "Replaced sink must not receive new frames");
 
@@ -683,7 +731,7 @@ class EncodedVideoFrameTests extends TestBase {
             factory.removeEncodedVideoFrameSink();
 
             loopback.pushFrames(1500);
-            grace(500);
+            assertTrue(waitForQuiescence(sinkB), "Sink B must stay quiet after removal");
 
             assertEquals(countB, sinkB.count.get(), "Sink B must not be invoked after removal");
         }
