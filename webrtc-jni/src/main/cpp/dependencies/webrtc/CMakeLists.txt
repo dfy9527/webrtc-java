@@ -114,7 +114,13 @@ file(TO_CMAKE_PATH "${WEBRTC_SRC_DIR}" WEBRTC_SRC_DIR)
 
 set(WEBRTC_DIR ${WEBRTC_SRC_DIR})
 set(WEBRTC_SRC ${WEBRTC_DIR}/src)
-set(WEBRTC_BUILD out/${TARGET_CPU})
+set(FFMPEG_PATCH "${CMAKE_CURRENT_LIST_DIR}/patches/ffmpeg/h264-sei-245-log.patch")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${FFMPEG_PATCH}")
+file(SHA256 "${FFMPEG_PATCH}" FFMPEG_PATCH_HASH)
+string(SUBSTRING "${FFMPEG_PATCH_HASH}" 0 12 FFMPEG_PATCH_HASH)
+# Both archive locations must bypass builds made without this FFmpeg patch.
+set(WEBRTC_BUILD out/${TARGET_CPU}-ffmpeg-${FFMPEG_PATCH_HASH})
+set(WEBRTC_INSTALL_DIR "${WEBRTC_INSTALL_DIR}/${TARGET_CPU}-ffmpeg-${FFMPEG_PATCH_HASH}")
 set(WEBRTC_LIB_PATH ${WEBRTC_SRC}/${WEBRTC_BUILD}/obj/${WEBRTC_LIB})
 set(WEBRTC_LIB_PATH_INSTALLED ${WEBRTC_INSTALL_DIR}/lib/${WEBRTC_LIB})
 
@@ -276,6 +282,23 @@ execute_command(
     COMMAND gclient sync
     WORKING_DIRECTORY "${WEBRTC_DIR}"
 )
+
+set(FFMPEG_SRC "${WEBRTC_SRC}/third_party/ffmpeg")
+execute_process(
+    COMMAND git apply "${FFMPEG_PATCH}"
+    WORKING_DIRECTORY "${FFMPEG_SRC}"
+    ERROR_VARIABLE FFMPEG_PATCH_ERROR
+    RESULT_VARIABLE FFMPEG_PATCH_RESULT)
+if(NOT FFMPEG_PATCH_RESULT STREQUAL "0")
+    execute_process(
+        COMMAND git apply --reverse --check "${FFMPEG_PATCH}"
+        WORKING_DIRECTORY "${FFMPEG_SRC}"
+        ERROR_QUIET
+        RESULT_VARIABLE FFMPEG_PATCH_RESULT)
+    if(NOT FFMPEG_PATCH_RESULT STREQUAL "0")
+        message(FATAL_ERROR "Could not apply the FFmpeg SEI log patch: ${FFMPEG_PATCH_ERROR}")
+    endif()
+endif()
 
 if(LINUX)
     sysroot_install()

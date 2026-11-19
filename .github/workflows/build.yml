@@ -8,6 +8,7 @@ on:
       - "**.cpp"
       - "**.h"
       - "**.java"
+      - "webrtc-jni/src/main/cpp/dependencies/webrtc/**"
 
   pull_request:
     branches:
