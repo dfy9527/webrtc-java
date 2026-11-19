@@ -5,6 +5,7 @@ on:
     branches:
       - main
     paths:
+      - ".github/workflows/build.yml"
       - "**.cpp"
       - "**.h"
       - "**.java"
@@ -110,9 +111,9 @@ jobs:
       matrix:
         platform:
           - name: macos_x86-64
-            runs-on: macos-14
+            runs-on: macos-15
           - name: macos_arm64
-            runs-on: macos-14
+            runs-on: macos-15
         java: [17]
     runs-on: ${{ matrix.platform.runs-on }}
     steps:
