@@ -65,12 +65,9 @@ class RTCDtmfSenderTests extends TestBase {
             return toneBuffers;
         }
 
-        void waitUntilCompleted() throws InterruptedException {
-            completedLatch.await();
-        }
-
         boolean awaitCompletion() throws InterruptedException {
-            return completedLatch.await(1, TimeUnit.SECONDS);
+            // Three 170 ms tones with 70 ms gaps leave little scheduling headroom in one second.
+            return completedLatch.await(5, TimeUnit.SECONDS);
         }
     }
 
@@ -168,9 +165,8 @@ class RTCDtmfSenderTests extends TestBase {
         TestDtmfSenderObserver observer = new TestDtmfSenderObserver();
 
         dtmfSender.registerObserver(observer);
-        dtmfSender.insertDtmf("123", 100, 70);
-
-        observer.waitUntilCompleted();
+        assertTrue(dtmfSender.insertDtmf("123", 100, 70));
+        assertTrue(observer.awaitCompletion(), "Timed out waiting for DTMF sequence to complete");
 
         assertEquals(Arrays.asList("1", "2", "3", null), observer.getTones());
 
